@@ -1,10 +1,11 @@
 const { default: mongoose } = require("mongoose");
 const { rolesAndRef, addUser } = require("../configs/helpers");
-const { Faculty, Department, User, Timetable, Attendance } = require("../models");
+const { Faculty, Department, User } = require("../models");
 const { TimetableService } = require("../services/timetable.service");
 const catchAsync = require("../configs/catchAsync");
 const { aggregateSalary } = require("../services/attendance.service");
 const { getFacultyDepartment } = require("../services/faculty.service");
+const facultyService = require("../services/faculty.service");
 
 async function addFaculty(facultyBody) {
     const faculty = new Faculty(facultyBody);
@@ -54,7 +55,7 @@ const createFaculty = async (req, res, next) => {
         // console.log(getDept);
         if (!getDept)
             return next({
-                statusCode: 401,
+                statusCode: 403,
                 message: "You are not authorized to Add faculty",
             });
 
@@ -123,15 +124,10 @@ const modifyFaculty = async (req, res, next) => {
         const toModify = req.body;
         if (!mongoose.isValidObjectId(fId))
             return next({ message: "invalid refrence for request", statusCode: 400 });
-        const isFacultyModified = await Faculty.updateOne(
-            { _id: fId },
-            { $set: toModify, $currentDate: { updatedAt: true } }
-        );
-        if (isFacultyModified.modifiedCount > 0)
-            return res
-                .status(201)
-                .send({ success: true, message: "Faculty Updated Successfully!" });
-        res.send({ success: false, message: "Unable to update Faculty" });
+        const isFacultyModified = await facultyService.updateFaculty(fId, toModify);
+        return res
+            .status(isFacultyModified.modifiedCount > 0 ? 201: 409)
+            .send({ success: isFacultyModified.modifiedCount > 0, message: isFacultyModified.modifiedCount > 0 ? "Faculty Updated Successfully!" :"Unable to update Faculty"});
     } catch (error) {
         error.statusCode = 500;
         next(error);
@@ -208,12 +204,19 @@ const getFaculties = async (req, res, next) => {
     try {
         const { role, roleId } = req.user;
         const search = {};
+        const populate = [
+            { path: "faculty", select: "name email profilePhoto" },
+            { path: "inDepartment", select: "_id deptName code" },
+        ]
+        if (role === "faculty") {
+            populate.pop();
+            const faculty = await facultyService.getFacultyDepartment(roleId);
+            search.inDepartment = faculty.inDepartment;
+            search._id = { $ne: roleId };
+        }
         if (role === "deptHead") search.inDepartment = roleId;
         if (role === "admindept") search.inOrganization = roleId;
-        const faculties = await Faculty.find(search).populate([
-            { path: "faculty", select: "name email profile" },
-            { path: "inDepartment", select: "_id deptName code" },
-        ]);
+        const faculties = await Faculty.find(search).populate(populate);
         res.send({ success: true, faculties });
     } catch (error) {
         error.statusCode = 500;
@@ -237,14 +240,24 @@ const getFacultyHeaderStatus = catchAsync(async (req, res, next) => {
     const aggrSalary = await aggregateSalary(roleId, month);
     const totalSubject = await TimetableService.aggregateSubjectCount(roleId, faculty.inDepartment);
     // console.log(totalSubject)
-    res.send({ 
-        totalTH: aggrSalary?.totalTH || 0, 
+    res.send({
+        totalTH: aggrSalary?.totalTH || 0,
         totalPR: aggrSalary?.totalPR || 0,
-        totalSalary: aggrSalary?.totalSalary || 0, 
-        totalAttendence: aggrSalary?.totalAttendence || 0, 
-        totalSubject 
+        totalSalary: aggrSalary?.totalSalary || 0,
+        totalAttendence: aggrSalary?.totalAttendence || 0,
+        totalSubject
     })
 });
+
+const getFacultyForSettings = catchAsync(async (req, res) => {
+    const { roleId } = req.user;
+    const result = await Faculty.findOne({ _id: roleId })
+        .select("-faculty -addedBy -isActive")
+        .populate([{ path: "inOrganization", select: "name" }, { path: "inDepartment", select: "deptName" }]);
+    res.send({ success: true, faculty: result || {} });
+});
+
+
 module.exports = {
     createFaculty,
     getFaculty,
@@ -252,7 +265,8 @@ module.exports = {
     deleteFaculty,
     getSingleDaySchedule,
     getFaculties,
-    getFacultyHeaderStatus
+    getFacultyHeaderStatus,
+    getFacultyForSettings
 };
 
 // const schedules = await Timetable.aggregate([
